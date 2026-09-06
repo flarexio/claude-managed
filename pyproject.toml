@@ -29,9 +29,9 @@ dev = ["ruff>=0.16,<0.17"]
 claude-managed = "claude_managed.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/jarvis-flarex/claude-managed"
-Repository = "https://github.com/jarvis-flarex/claude-managed"
-Issues = "https://github.com/jarvis-flarex/claude-managed/issues"
+Homepage = "https://github.com/flarexio/claude-managed"
+Repository = "https://github.com/flarexio/claude-managed"
+Issues = "https://github.com/flarexio/claude-managed/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/claude_managed"]

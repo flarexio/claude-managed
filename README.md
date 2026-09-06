@@ -40,19 +40,19 @@ A Claude `Stop` event is a signal, not proof of completion. A supervisor can use
 With `pipx`:
 
 ```bash
-pipx install git+https://github.com/jarvis-flarex/claude-managed.git
+pipx install git+https://github.com/flarexio/claude-managed.git
 ```
 
 Or with `uv`:
 
 ```bash
-uv tool install git+https://github.com/jarvis-flarex/claude-managed.git
+uv tool install git+https://github.com/flarexio/claude-managed.git
 ```
 
 For development:
 
 ```bash
-git clone https://github.com/jarvis-flarex/claude-managed.git
+git clone https://github.com/flarexio/claude-managed.git
 cd claude-managed
 python -m venv .venv
 . .venv/bin/activate
