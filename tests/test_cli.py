@@ -11,6 +11,14 @@ from claude_managed.settings import EVENTS, build_settings
 
 
 class CliTests(unittest.TestCase):
+    def test_parses_and_compares_supported_claude_version(self):
+        version = cli._parse_claude_version("2.1.198 (Claude Code)")
+        self.assertGreaterEqual(version, cli.MIN_CLAUDE_VERSION)
+
+    def test_rejects_unparseable_claude_version(self):
+        with self.assertRaisesRegex(ValueError, "could not parse"):
+            cli._parse_claude_version("Claude Code development build")
+
     def test_settings_include_expected_events_and_async_hooks(self):
         settings = build_settings("/usr/local/bin/claude-managed")
         self.assertEqual(set(settings["hooks"]), set(EVENTS))

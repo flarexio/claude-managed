@@ -3,8 +3,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import secrets
 import shutil
+import subprocess
 import sys
 import urllib.request
 from pathlib import Path
@@ -22,6 +24,8 @@ from .config import (
 )
 from .forwarder import hook_main, read_secret
 from .settings import build_settings, write_settings
+
+MIN_CLAUDE_VERSION = (2, 1, 198)
 
 
 def _hook_command() -> tuple[str, tuple[str, ...]]:
@@ -133,6 +137,16 @@ def _health_url(webhook_url: str) -> str:
     return urlunsplit((parsed.scheme, parsed.netloc, "/health", "", ""))
 
 
+def _parse_claude_version(output: str) -> tuple[int, int, int]:
+    match = re.search(r"\b(\d+)\.(\d+)\.(\d+)\b", output)
+    if not match:
+        raise ValueError(
+            f"could not parse Claude Code version from: {output.strip()!r}"
+        )
+    major, minor, patch = match.groups()
+    return int(major), int(minor), int(patch)
+
+
 def cmd_doctor(_: argparse.Namespace) -> int:
     checks: list[tuple[str, bool, str]] = []
     try:
@@ -143,7 +157,26 @@ def cmd_doctor(_: argparse.Namespace) -> int:
         config = None
 
     claude = shutil.which("claude")
-    checks.append(("claude", claude is not None, claude or "not found on PATH"))
+    if claude:
+        try:
+            version_result = subprocess.run(
+                [claude, "--version"],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            version_text = (version_result.stdout or version_result.stderr).strip()
+            version = _parse_claude_version(version_text)
+            version_ok = version >= MIN_CLAUDE_VERSION
+            detail = f"{claude}: {version_text}"
+            if not version_ok:
+                detail += "; requires Claude Code >=2.1.198"
+            checks.append(("claude", version_ok, detail))
+        except (OSError, subprocess.SubprocessError, ValueError) as exc:
+            checks.append(("claude", False, str(exc)))
+    else:
+        checks.append(("claude", False, "not found on PATH"))
 
     if config:
         secret_ok, secret_detail = secure_file(config.secret_file)

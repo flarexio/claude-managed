@@ -47,6 +47,9 @@ class EndToEndCliTests(unittest.TestCase):
             fake_claude.write_text(
                 "#!/usr/bin/env python3\n"
                 "import json, os, sys\n"
+                "if sys.argv[1:] == ['--version']:\n"
+                "    print('2.1.198 (Claude Code)')\n"
+                "    raise SystemExit(0)\n"
                 "open(os.environ['FAKE_CLAUDE_ARGS'], 'w').write(json.dumps(sys.argv[1:]))\n"
             )
             fake_claude.chmod(0o755)

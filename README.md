@@ -91,7 +91,7 @@ claude-managed doctor
 It checks:
 
 - configuration validity;
-- Claude executable availability;
+- Claude executable availability and minimum supported version;
 - secret permissions;
 - generated settings freshness;
 - receiver `/health` response.

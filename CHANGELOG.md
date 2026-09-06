@@ -13,4 +13,4 @@ Initial alpha release:
 - local setup and health diagnostics;
 - Hermes supervisor prompt and end-to-end test coverage;
 - enforced managed-Hook flags and configuration validation;
-- safe TOML escaping and Claude Code 2.1.198+ compatibility guidance.
+- safe TOML escaping and enforced Claude Code 2.1.198+ compatibility.
