@@ -11,16 +11,29 @@ EVENTS: dict[str, str | None] = {
 }
 
 
-def build_settings(executable: str, prefix_args: tuple[str, ...] = ()) -> dict:
+def build_settings(
+    executable: str,
+    prefix_args: tuple[str, ...] = (),
+    *,
+    context_file: Path | None = None,
+) -> dict:
+    """Build Claude Hook settings.
+
+    With ``context_file`` every Hook explicitly names one pinned launch
+    context; without it the legacy, ambient-config ``hook-forward`` is used.
+    """
     hooks: dict[str, list[dict]] = {}
+    args = [*prefix_args, "hook-forward"]
+    if context_file is not None:
+        args.extend(["--context", str(context_file)])
     command = {
         "type": "command",
         "command": executable,
-        "args": [*prefix_args, "hook-forward"],
+        "args": args,
         "async": True,
     }
     for event, matcher in EVENTS.items():
-        group: dict = {"hooks": [command.copy()]}
+        group: dict = {"hooks": [{**command, "args": list(args)}]}
         if matcher is not None:
             group["matcher"] = matcher
         hooks[event] = [group]

@@ -17,6 +17,10 @@ Please report security issues through GitHub's private vulnerability reporting f
 
 A Claude lifecycle event is untrusted input and never proves task completion.
 
+## Launch ownership
+
+Each `run`/`resume` pins its route and secret reference in a private per-launch context, and inside Hermes it refuses to launch without an owner-specific route. `claude-managed` does not verify who owns a webhook route. Giving each owner a distinct route and secret, and making sure that route delivers only to that owner, is the operator's and receiver's responsibility. Launch contexts are protected by file permissions against other users, not against processes running as the same user. The `X-Claude-Managed-Launch-ID` header is unsigned.
+
 ## Secret handling
 
 - Keep the HMAC secret outside Git and Claude settings.

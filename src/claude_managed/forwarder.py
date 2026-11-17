@@ -11,6 +11,7 @@ import uuid
 from pathlib import Path
 
 from .config import Config, load_config, secure_file
+from .launch import ContextError, hermes_owner, load_context, secret_fingerprint
 
 MAX_BODY_BYTES = 1_048_576
 
@@ -61,26 +62,42 @@ def read_secret(path: Path) -> bytes:
     return secret
 
 
-def forward(raw_body: bytes, config: Config) -> int:
+def fallback_error_log() -> Path:
+    return Path.home() / ".local/state/claude-managed/errors.log"
+
+
+def forward(
+    raw_body: bytes,
+    config: Config,
+    *,
+    launch_id: str | None = None,
+    expected_fingerprint: str | None = None,
+) -> int:
     if len(raw_body) > MAX_BODY_BYTES:
         raise ValueError(f"hook payload exceeds {MAX_BODY_BYTES} bytes")
     payload = validate_payload(json.loads(raw_body), config)
     secret = read_secret(config.secret_file)
+    if expected_fingerprint is not None and not hmac.compare_digest(
+        secret_fingerprint(secret), expected_fingerprint
+    ):
+        raise ContextError("secret changed since launch; refusing to sign")
     timestamp = str(int(time.time()))
     signature = hmac.new(
         secret, timestamp.encode() + b"." + raw_body, hashlib.sha256
     ).hexdigest()
+    headers = {
+        "Content-Type": "application/json",
+        "X-Webhook-Timestamp": timestamp,
+        "X-Webhook-Signature-V2": signature,
+        "X-Request-ID": str(uuid.uuid4()),
+        "X-Webhook-Event": str(payload.get("hook_event_name", "claude-code")),
+    }
+    if launch_id is not None:
+        # Informational and unsigned: routing isolation comes from the pinned
+        # per-launch URL and secret, never from this header.
+        headers["X-Claude-Managed-Launch-ID"] = launch_id
     request = urllib.request.Request(
-        config.webhook_url,
-        data=raw_body,
-        method="POST",
-        headers={
-            "Content-Type": "application/json",
-            "X-Webhook-Timestamp": timestamp,
-            "X-Webhook-Signature-V2": signature,
-            "X-Request-ID": str(uuid.uuid4()),
-            "X-Webhook-Event": str(payload.get("hook_event_name", "claude-code")),
-        },
+        config.webhook_url, data=raw_body, method="POST", headers=headers
     )
     opener = urllib.request.build_opener(_NoRedirect)
     with opener.open(request, timeout=config.timeout_seconds) as response:
@@ -89,20 +106,40 @@ def forward(raw_body: bytes, config: Config) -> int:
     return 0
 
 
-def hook_main() -> int:
-    config: Config | None = None
+def _drop(log_path: Path | None, message: str) -> int:
     try:
+        log_error(log_path or fallback_error_log(), message)
+    except Exception:  # noqa: BLE001, S110 - nowhere else is safe to report a log failure
+        pass
+    return 0  # A notification failure must never block Claude Code.
+
+
+def hook_main(context_path: str | None = None) -> int:
+    """Hook entry point. Always exits zero; failures are logged and dropped."""
+    log_path: Path | None = None
+    try:
+        if context_path is not None:
+            # Pinned launch: consult only the explicit context, never ambient
+            # CLAUDE_MANAGED_HOME/XDG configuration or a shared route.
+            context = load_context(context_path)
+            log_path = context.config.error_log
+            raw_body = sys.stdin.buffer.read(MAX_BODY_BYTES + 1)
+            return forward(
+                raw_body,
+                context.config,
+                launch_id=context.launch_id,
+                expected_fingerprint=context.secret_fingerprint,
+            )
+        # Legacy unbound Hook (settings generated before per-launch contexts).
+        if hermes_owner(os.environ) is not None:
+            raise ContextError(
+                "unbound legacy hook inside a Hermes session; dropped instead of "
+                "using the shared route (relaunch with 'claude-managed run "
+                "--webhook-url ...')"
+            )
         config = load_config()
+        log_path = config.error_log
         raw_body = sys.stdin.buffer.read(MAX_BODY_BYTES + 1)
         return forward(raw_body, config)
     except Exception as exc:  # noqa: BLE001 - a Hook must never break Claude Code
-        try:
-            path = (
-                config.error_log
-                if config
-                else Path.home() / ".local/state/claude-managed/errors.log"
-            )
-            log_error(path, f"{type(exc).__name__}: {exc}")
-        except Exception:  # noqa: BLE001, S110 - nowhere else is safe to report a log failure
-            pass
-        return 0  # A notification failure must never block Claude Code.
+        return _drop(log_path, f"{type(exc).__name__}: {exc}")
