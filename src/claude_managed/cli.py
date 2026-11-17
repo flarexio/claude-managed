@@ -9,12 +9,14 @@ import shutil
 import subprocess
 import sys
 import urllib.request
+from dataclasses import replace
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 from . import __version__
 from .config import (
     DEFAULT_URL,
+    Config,
     config_dir,
     load_config,
     secure_file,
@@ -22,7 +24,8 @@ from .config import (
     validate_url,
     write_config,
 )
-from .forwarder import hook_main, read_secret
+from .forwarder import _drop, hook_main, read_secret
+from .launch import ContextError, create_launch, hermes_owner
 from .settings import build_settings, write_settings
 
 MIN_CLAUDE_VERSION = (2, 1, 198)
@@ -32,11 +35,8 @@ def _hook_command() -> tuple[str, tuple[str, ...]]:
     found = shutil.which("claude-managed")
     if found:
         return str(Path(found).resolve()), ()
-    return sys.executable, ("-m", "claude_managed")
-
-
-def _strip_separator(args: list[str]) -> list[str]:
-    return args[1:] if args and args[0] == "--" else args
+    # -I keeps the Hook's working directory (the user's project) off sys.path.
+    return sys.executable, ("-I", "-m", "claude_managed")
 
 
 def cmd_init(args: argparse.Namespace) -> int:
@@ -222,19 +222,15 @@ def cmd_settings(_: argparse.Namespace) -> int:
     return 0
 
 
-def _exec_claude(extra: list[str], resume_id: str | None = None) -> int:
-    config = load_config()
-    if not config.settings_file.is_file():
-        raise FileNotFoundError(
-            f"settings not found: {config.settings_file}; run 'claude-managed settings'"
-        )
-    extra = _strip_separator(extra)
+BLOCKED_CLAUDE_FLAGS = {"--settings", "--bare", "--safe-mode"}
+
+
+def _check_claude_args(extra: list[str]) -> None:
     blocked = next(
         (
             arg
             for arg in extra
-            if arg in {"--settings", "--bare", "--safe-mode"}
-            or arg.startswith("--settings=")
+            if arg in BLOCKED_CLAUDE_FLAGS or arg.startswith("--settings=")
         ),
         None,
     )
@@ -242,15 +238,95 @@ def _exec_claude(extra: list[str], resume_id: str | None = None) -> int:
         raise ValueError(
             f"{blocked} disables or replaces managed hooks and is not allowed"
         )
+
+
+def _resolve_route(
+    config: Config, args: argparse.Namespace, owner: dict[str, str] | None
+) -> tuple[Config, str]:
+    """Return the pinned Config for this launch and its route kind."""
+    webhook_url = getattr(args, "webhook_url", None)
+    secret_file = getattr(args, "secret_file", None)
+    shared = bool(getattr(args, "shared_route", False))
+    if shared and (webhook_url or secret_file):
+        raise ValueError("--shared-route cannot be combined with --webhook-url")
+    if secret_file and not webhook_url:
+        raise ValueError("--secret-file requires --webhook-url")
+    if webhook_url:
+        validate_url(webhook_url)
+        if owner is not None and webhook_url == config.webhook_url:
+            raise ValueError(
+                "--webhook-url equals the shared configured route; a Hermes "
+                "launch needs an owner-specific route (or pass --shared-route "
+                "deliberately)"
+            )
+        return (
+            replace(
+                config,
+                webhook_url=webhook_url,
+                secret_file=(
+                    Path(secret_file).expanduser().resolve()
+                    if secret_file
+                    else config.secret_file
+                ),
+            ),
+            "owner",
+        )
+    if owner is not None and not shared:
+        raise ValueError(
+            "Hermes session detected but no owner-specific route was given; "
+            "refusing to route this session's hooks to the shared receiver. "
+            "Pass --webhook-url (and --secret-file) for this owner's route, "
+            "or --shared-route to opt in deliberately"
+        )
+    return config, "shared"
+
+
+def _exec_claude(args: argparse.Namespace, resume_id: str | None = None) -> int:
+    extra = list(args.claude_args)
+    _check_claude_args(extra)
+    home = config_dir()
+    config = load_config(home)
+    owner = hermes_owner(os.environ)
+    pinned, route = _resolve_route(config, args, owner)
+    secret = read_secret(pinned.secret_file)
     claude = shutil.which("claude")
     if not claude:
         raise FileNotFoundError("claude executable not found on PATH")
+    command, prefix_args = _hook_command()
+    launch = create_launch(
+        home=home,
+        config=pinned,
+        secret=secret,
+        route=route,
+        owner=owner,
+        command="resume" if resume_id is not None else "run",
+        resume_session_id=resume_id,
+        hook_executable=command,
+        hook_prefix_args=prefix_args,
+    )
     argv = [claude]
     if resume_id is not None:
         argv.extend(["--resume", resume_id])
-    argv.extend(["--settings", str(config.settings_file), *extra])
+    argv.extend(["--settings", str(launch.settings_file), *extra])
     os.execv(claude, argv)
     return 127
+
+
+def _add_route_options(parser: argparse.ArgumentParser) -> None:
+    group = parser.add_argument_group("per-launch routing")
+    group.add_argument(
+        "--webhook-url",
+        help="owner-specific receiver for this launch only (shared config untouched)",
+    )
+    group.add_argument(
+        "--secret-file",
+        help="private HMAC secret file for --webhook-url (default: configured secret)",
+    )
+    group.add_argument(
+        "--shared-route",
+        action="store_true",
+        help="deliberately use the configured shared route inside a Hermes session",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -293,34 +369,61 @@ def build_parser() -> argparse.ArgumentParser:
     settings.set_defaults(func=cmd_settings)
 
     run = sub.add_parser("run", help="start a managed interactive Claude Code session")
+    _add_route_options(run)
     run.add_argument(
         "claude_args",
         nargs=argparse.REMAINDER,
         help="arguments passed to Claude after --",
     )
-    run.set_defaults(func=lambda a: _exec_claude(a.claude_args))
+    run.set_defaults(func=lambda a: _exec_claude(a))
 
     resume = sub.add_parser(
         "resume", help="resume a Claude Code session with managed hooks"
     )
+    _add_route_options(resume)
     resume.add_argument("session_id", help="Claude Code session ID, preserved exactly")
     resume.add_argument(
         "claude_args",
         nargs=argparse.REMAINDER,
         help="arguments passed to Claude after --",
     )
-    resume.set_defaults(func=lambda a: _exec_claude(a.claude_args, a.session_id))
+    resume.set_defaults(func=lambda a: _exec_claude(a, a.session_id))
 
     hook = sub.add_parser("hook-forward", help=argparse.SUPPRESS)
-    hook.set_defaults(func=lambda _: hook_main())
+    hook.add_argument("--context", help=argparse.SUPPRESS)
+    hook.set_defaults(func=lambda a: hook_main(a.context))
     return parser
 
 
+def _hook_entry(argv: list[str]) -> int:
+    """Parse hook-forward arguments without ever exiting non-zero."""
+    if not argv:
+        return hook_main()
+    if len(argv) == 2 and argv[0] == "--context":
+        return hook_main(argv[1])
+    if len(argv) == 1 and argv[0].startswith("--context="):
+        return hook_main(argv[0].split("=", 1)[1])
+    return _drop(None, "ValueError: unexpected hook-forward arguments; dropped")
+
+
 def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["hook-forward"]:
+        return _hook_entry(argv[1:])
     parser = build_parser()
-    args = parser.parse_args(argv)
+    if argv[:1] in (["run"], ["resume"]) and "--" in argv:
+        # Split at the first separator ourselves: everything after it belongs
+        # to Claude verbatim, independent of argparse's version-specific
+        # handling of "--" with REMAINDER.
+        split = argv.index("--")
+        args = parser.parse_args(argv[:split])
+        if args.claude_args:
+            parser.error("Claude arguments must follow '--'")
+        args.claude_args = argv[split + 1 :]
+    else:
+        args = parser.parse_args(argv)
     try:
         return int(args.func(args))
-    except (FileNotFoundError, ValueError, KeyError, OSError) as exc:
+    except (FileNotFoundError, ValueError, KeyError, OSError, ContextError) as exc:
         print(f"claude-managed: {exc}", file=sys.stderr)
         return 2

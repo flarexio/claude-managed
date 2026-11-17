@@ -1,4 +1,4 @@
-A trusted local Claude Code lifecycle Hook fired. Event payload:
+A trusted local Claude Code lifecycle Hook fired on this owner-specific route. You are a separate webhook-triggered run, not the conversation that launched Claude. Event payload:
 
 {__raw__}
 
